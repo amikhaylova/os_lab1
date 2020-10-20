@@ -3,55 +3,106 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/file.h>
+#include <values.h>
 
-int num_of_threads = 62;
+
+int num_of_threads_random = 62;
+int num_of_threads_agregate = 108;
 int size = 198 * 1024 * 1024;
 int part = 0;
 char *array;
 int size_of_file = 148 * 1024 * 1024;
 int size_of_block = 45;
+int num_of_files;
+int fd[];
+int max_value = MININT;
 
 typedef struct args_for_random_tag {
     int id;
 } args_for_random;
 
+typedef struct args_for_agr_tag {
+    int id;
+    int max;
+} args_for_agr;
+
 void *fill_array(void *arg) {
     args_for_random *args = (args_for_random *) arg;
-    int one_thread_should_write = size / num_of_threads;
+    int one_thread_should_write = size / num_of_threads_random;
     int start = args->id * one_thread_should_write;
     int randomData = open("/dev/urandom", O_RDONLY);
     if (randomData < 0) {
         printf("could not access urandom\n");
     } else {
         ssize_t result;
-        if (part != num_of_threads)
+        if (part != num_of_threads_random)
             result = read(randomData, &array[start], one_thread_should_write);
         else
-            result = read(randomData, &array[start], size - (one_thread_should_write * (num_of_threads - 1)));
+            result = read(randomData, &array[start], size - (one_thread_should_write * (num_of_threads_random - 1)));
         if (result < 0) {
             printf("could not read from urandom\n");
         }
+    }
+    close(randomData);
+    return 0;
 }
-close(randomData);
-return 0;
+
+void *agr_array(void *arg) {
+    args_for_agr *args = (args_for_agr *) arg;
+    int max = MININT;
+
+    for (int i = 0; i < num_of_files; i++) {
+        if (i == num_of_files - 1) {
+            int data_size;
+            int file_act_size = size - size_of_file * (num_of_files - 1);
+            if (args->id != num_of_threads_agregate - 1) {
+                data_size = file_act_size / num_of_threads_agregate;
+            } else {
+                data_size = file_act_size - ((num_of_threads_agregate - 1) * (file_act_size / num_of_threads_agregate));
+            }
+            char buf[data_size];
+            ssize_t bytes_read = pread(fd[i], buf, data_size, (file_act_size / num_of_threads_agregate) * args->id);
+            for (int j = 0; j < sizeof(buf); j++) {
+                if (buf[j] > max)
+                    max = buf[j];
+            }
+        } else {
+            int data_size;
+            if (args->id != num_of_threads_agregate - 1) {
+                data_size = size_of_file / num_of_threads_agregate;
+            } else {
+                data_size = size_of_file - ((num_of_threads_agregate - 1) * (size_of_file / num_of_threads_agregate));
+            }
+            char buf[data_size];
+            ssize_t bytes_read = pread(fd[i], buf, data_size, (size_of_file / num_of_threads_agregate) * args->id);
+            for (int j = 0; j < sizeof(buf); j++) {
+                if (buf[j] > max)
+                    max = buf[j];
+            }
+        }
+    }
+    args->max = max;
+    return 0;
 }
 
 int main() {
+    //выделяем область памяти
     array = (char *) malloc(size);
 
-    pthread_t threads[num_of_threads];
-    args_for_random args[num_of_threads];
+    //заполняем область памяти случайными числами
+    pthread_t threads[num_of_threads_random];
+    args_for_random args_read[num_of_threads_random];
 
-    for (int i = 0; i < num_of_threads; i++) {
-        args[i].id = i;
-        pthread_create(&threads[i], NULL, fill_array, (void *) &args[i]);
+    for (int i = 0; i < num_of_threads_random; i++) {
+        args_read[i].id = i;
+        pthread_create(&threads[i], NULL, fill_array, (void *) &args_read[i]);
     }
-
-
-    for (int i = 0; i < num_of_threads; i++)
+    for (int i = 0; i < num_of_threads_random; i++)
         pthread_join(threads[i], NULL);
 
-    int num_of_files;
+    //сохраняем область памяти в файлы
+    num_of_files;
     if (size % size_of_file == 0) {
         num_of_files = size / size_of_file;
     } else {
@@ -64,7 +115,8 @@ int main() {
     for (int i = 1; i < num_of_files + 1; i++) {
         char filename[sizeof "file1"];
         sprintf(filename, "file%d", i);
-        int file = open(filename, O_WRONLY | O_CREAT, 0666);
+        int file = open(filename, O_RDWR | O_CREAT, 0666);
+        flock(filename, LOCK_EX);
         while ((wrote < size_of_file) && (sum < size)) {
             size_t bytes_wrote;
             if (wrote + size_of_block > size_of_file)
@@ -81,10 +133,37 @@ int main() {
             }
             j++;
         }
+        flock(filename, LOCK_UN);
         wrote = 0;
         close(file);
     }
-    return 0;
+
+    //подсчитываем агрегированные характеристики, читая из файлов
+    pthread_t threads_agr[num_of_threads_agregate];
+    args_for_agr args_agr[num_of_threads_agregate];
+
+    for (int i = 1; i < num_of_files + 1; i++) {
+        char filename[sizeof "file1"];
+        sprintf(filename, "file%d", i);
+        int file = open(filename, O_RDWR);
+        fd[i - 1] = file;
+        //printf("%d\n", fd[i-1]);
+    }
+
+    for (int i = 0; i < num_of_threads_agregate; i++) {
+        args_agr[i].id = i;
+        pthread_create(&threads_agr[i], NULL, agr_array, (void *) &args_agr[i]);
+    }
+
+    for (int i = 0; i < num_of_threads_agregate; i++)
+        pthread_join(threads_agr[i], NULL);
+
+    for (int i = 0; i < num_of_threads_agregate; i++){
+        if(args_agr[i].max > max_value){
+            max_value = args_agr[i].max;
+        }
+    }
+        return 0;
 }
 
 
