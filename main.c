@@ -67,6 +67,10 @@ void *agr_array(void *arg) {
                 if (buf[j] > max)
                     max = buf[j];
             }
+            if (args->id == num_of_threads_agregate - 1) {
+                flock(fd[i], LOCK_UN);
+                close(fd[i]);
+            }
         } else {
             int data_size;
             if (args->id != num_of_threads_agregate - 1) {
@@ -80,6 +84,10 @@ void *agr_array(void *arg) {
                 if (buf[j] > max)
                     max = buf[j];
             }
+            if (args->id == num_of_threads_agregate - 1) {
+                flock(fd[i], LOCK_UN);
+                close(fd[i]);
+            }
         }
     }
     args->max = max;
@@ -87,83 +95,99 @@ void *agr_array(void *arg) {
 }
 
 int main() {
-    //выделяем область памяти
-    array = (char *) malloc(size);
+    while (1) {
+        //выделяем область памяти
+        array = (char *) malloc(size);
 
-    //заполняем область памяти случайными числами
-    pthread_t threads[num_of_threads_random];
-    args_for_random args_read[num_of_threads_random];
+        //заполняем область памяти случайными числами
+        pthread_t threads[num_of_threads_random];
+        args_for_random args_read[num_of_threads_random];
 
-    for (int i = 0; i < num_of_threads_random; i++) {
-        args_read[i].id = i;
-        pthread_create(&threads[i], NULL, fill_array, (void *) &args_read[i]);
-    }
-    for (int i = 0; i < num_of_threads_random; i++)
-        pthread_join(threads[i], NULL);
+        for (int i = 0; i < num_of_threads_random; i++) {
+            args_read[i].id = i;
+            pthread_create(&threads[i], NULL, fill_array, (void *) &args_read[i]);
+        }
+        for (int i = 0; i < num_of_threads_random; i++)
+            pthread_join(threads[i], NULL);
 
-    //сохраняем область памяти в файлы
-    num_of_files;
-    if (size % size_of_file == 0) {
-        num_of_files = size / size_of_file;
-    } else {
-        num_of_files = size / size_of_file + 1;
-    }
+        //сохраняем область памяти в файлы
+        num_of_files;
+        if (size % size_of_file == 0) {
+            num_of_files = size / size_of_file;
+        } else {
+            num_of_files = size / size_of_file + 1;
+        }
 
-    size_t wrote = 0;
-    size_t sum = 0;
-    int j = 0;
-    for (int i = 1; i < num_of_files + 1; i++) {
-        char filename[sizeof "file1"];
-        sprintf(filename, "file%d", i);
-        int file = open(filename, O_RDWR | O_CREAT, 0666);
-        flock(filename, LOCK_EX);
-        while ((wrote < size_of_file) && (sum < size)) {
-            size_t bytes_wrote;
-            if (wrote + size_of_block > size_of_file)
-                bytes_wrote = write(file, &array[j * size_of_block], size_of_file - wrote);
-            else if (sum + size_of_block > size)
-                bytes_wrote = write(file, &array[j * size_of_block], size - sum);
-            else
-                bytes_wrote = write(file, &array[j * size_of_block], size_of_block);
-            if (bytes_wrote >= 0) {
-                wrote += bytes_wrote;
-                sum += bytes_wrote;
-            } else {
-                printf("something went wrong during writing");
+        size_t wrote = 0;
+        size_t sum = 0;
+        int j = 0;
+        for (int i = 1; i < num_of_files + 1; i++) {
+            char filename[sizeof "file1"];
+            sprintf(filename, "file%d", i);
+            int file = open(filename, O_RDWR | O_CREAT, 0666);
+            flock(file, LOCK_EX);
+            while ((wrote < size_of_file) && (sum < size)) {
+                size_t bytes_wrote;
+                if (wrote + size_of_block > size_of_file)
+                    bytes_wrote = write(file, &array[j * size_of_block], size_of_file - wrote);
+                else if (sum + size_of_block > size)
+                    bytes_wrote = write(file, &array[j * size_of_block], size - sum);
+                else
+                    bytes_wrote = write(file, &array[j * size_of_block], size_of_block);
+                if (bytes_wrote >= 0) {
+                    wrote += bytes_wrote;
+                    sum += bytes_wrote;
+                } else {
+                    printf("something went wrong during writing");
+                }
+                j++;
             }
-            j++;
+            flock(file, LOCK_UN);
+            wrote = 0;
+            close(file);
         }
-        flock(filename, LOCK_UN);
-        wrote = 0;
-        close(file);
-    }
 
-    //подсчитываем агрегированные характеристики, читая из файлов
-    pthread_t threads_agr[num_of_threads_agregate];
-    args_for_agr args_agr[num_of_threads_agregate];
+        //деаллокация
+        free(array);
 
-    for (int i = 1; i < num_of_files + 1; i++) {
-        char filename[sizeof "file1"];
-        sprintf(filename, "file%d", i);
-        int file = open(filename, O_RDWR);
-        fd[i - 1] = file;
-        //printf("%d\n", fd[i-1]);
-    }
+        //подсчитываем агрегированную характеристику, читая из файлов в несколько потоков
+        pthread_t threads_agr[num_of_threads_agregate];
+        args_for_agr args_agr[num_of_threads_agregate];
 
-    for (int i = 0; i < num_of_threads_agregate; i++) {
-        args_agr[i].id = i;
-        pthread_create(&threads_agr[i], NULL, agr_array, (void *) &args_agr[i]);
-    }
-
-    for (int i = 0; i < num_of_threads_agregate; i++)
-        pthread_join(threads_agr[i], NULL);
-
-    for (int i = 0; i < num_of_threads_agregate; i++){
-        if(args_agr[i].max > max_value){
-            max_value = args_agr[i].max;
+        for (int i = 1; i < num_of_files + 1; i++) {
+            char filename[sizeof "file1"];
+            sprintf(filename, "file%d", i);
+            int file = open(filename, O_RDWR);
+            flock(file, LOCK_SH);
+            fd[i - 1] = file;
         }
+
+        for (int i = 0; i < num_of_threads_agregate; i++) {
+            args_agr[i].id = i;
+            pthread_create(&threads_agr[i], NULL, agr_array, (void *) &args_agr[i]);
+        }
+
+        for (int i = 0; i < num_of_threads_agregate; i++)
+            pthread_join(threads_agr[i], NULL);
+
+        //ищем максимум
+        for (int i = 0; i < num_of_threads_agregate; i++) {
+            if (args_agr[i].max > max_value) {
+                max_value = args_agr[i].max;
+            }
+        }
+
+        /*int local_max = MININT;
+        for (int i = 0; i < size; i++){
+            if(array[i] > local_max){
+                local_max = array[i];
+            }
+        }
+        printf("%d \n", local_max);
+        printf("%d \n", max_value);*/
+
     }
-        return 0;
+    return 0;
 }
 
 
